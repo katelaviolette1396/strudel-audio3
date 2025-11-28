@@ -504,18 +504,317 @@ function mainLoop() {
 
 audio.src = 'data:audio/mp3;base64,' + AUDIO_DATA;
 
+// ============================================
+// WEB AUDIO API SETUP FOR MOOD EFFECTS
+// ============================================
+
+var audioContext = null;
+var sourceNode = null;
+var gainNode = null;
+var lowpassFilter = null;
+var highpassFilter = null;
+var convolverNode = null;
+var delayNode = null;
+var delayGain = null;
+var distortionNode = null;
+var chopperGain = null;
+var chopperInterval = null;
+
+var currentMood = 'neutral';
+
+// Create impulse response for reverb
+function createReverbImpulse(duration, decay) {
+  var rate = audioContext.sampleRate;
+  var length = rate * duration;
+  var impulse = audioContext.createBuffer(2, length, rate);
+  var left = impulse.getChannelData(0);
+  var right = impulse.getChannelData(1);
+  for (var i = 0; i < length; i++) {
+    var n = i / length;
+    left[i] = (Math.random() * 2 - 1) * Math.pow(1 - n, decay);
+    right[i] = (Math.random() * 2 - 1) * Math.pow(1 - n, decay);
+  }
+  return impulse;
+}
+
+// Create distortion curve for glitch effect
+function makeDistortionCurve(amount) {
+  var k = amount;
+  var n_samples = 44100;
+  var curve = new Float32Array(n_samples);
+  var deg = Math.PI / 180;
+  for (var i = 0; i < n_samples; i++) {
+    var x = (i * 2) / n_samples - 1;
+    curve[i] = ((3 + k) * x * 20 * deg) / (Math.PI + k * Math.abs(x));
+  }
+  return curve;
+}
+
+function initAudioGraph() {
+  audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  
+  // Create source from audio element
+  sourceNode = audioContext.createMediaElementSource(audio);
+  
+  // Master gain
+  gainNode = audioContext.createGain();
+  gainNode.gain.value = 1.0;
+  
+  // Lowpass filter (for moody darkness)
+  lowpassFilter = audioContext.createBiquadFilter();
+  lowpassFilter.type = 'lowpass';
+  lowpassFilter.frequency.value = 20000; // Start open
+  lowpassFilter.Q.value = 1;
+  
+  // Highpass filter (for playful brightness)
+  highpassFilter = audioContext.createBiquadFilter();
+  highpassFilter.type = 'highpass';
+  highpassFilter.frequency.value = 20; // Start open
+  highpassFilter.Q.value = 1;
+  
+  // Delay for echo/reverb effect
+  delayNode = audioContext.createDelay(1.0);
+  delayNode.delayTime.value = 0;
+  delayGain = audioContext.createGain();
+  delayGain.gain.value = 0;
+  
+  // Distortion for glitch
+  distortionNode = audioContext.createWaveShaper();
+  distortionNode.curve = makeDistortionCurve(0);
+  distortionNode.oversample = '4x';
+  
+  // Chopper gain for rhythmic gating (tipper mode)
+  chopperGain = audioContext.createGain();
+  chopperGain.gain.value = 1.0;
+  
+  // Convolver for reverb
+  convolverNode = audioContext.createConvolver();
+  convolverNode.buffer = createReverbImpulse(2.5, 2.5);
+  var reverbGain = audioContext.createGain();
+  reverbGain.gain.value = 0;
+  
+  // Connect the main chain
+  // source -> lowpass -> highpass -> distortion -> chopper -> gain -> destination
+  sourceNode.connect(lowpassFilter);
+  lowpassFilter.connect(highpassFilter);
+  highpassFilter.connect(distortionNode);
+  distortionNode.connect(chopperGain);
+  chopperGain.connect(gainNode);
+  
+  // Delay feedback loop
+  chopperGain.connect(delayNode);
+  delayNode.connect(delayGain);
+  delayGain.connect(gainNode);
+  delayGain.connect(delayNode); // Feedback
+  
+  // Reverb send
+  chopperGain.connect(convolverNode);
+  convolverNode.connect(reverbGain);
+  reverbGain.connect(gainNode);
+  
+  // Store reverb gain for mood changes
+  window.reverbGain = reverbGain;
+  
+  // Final output
+  gainNode.connect(audioContext.destination);
+}
+
+// ============================================
+// MOOD IMPLEMENTATIONS
+// ============================================
+
+function applyMood(mood) {
+  if (!audioContext) return;
+  
+  currentMood = mood;
+  var now = audioContext.currentTime;
+  var rampTime = 0.5; // Smooth transition time
+  
+  // Clear any chopper interval
+  if (chopperInterval) {
+    clearInterval(chopperInterval);
+    chopperInterval = null;
+    chopperGain.gain.cancelScheduledValues(now);
+    chopperGain.gain.setValueAtTime(1.0, now);
+  }
+  
+  switch(mood) {
+    case 'moody':
+      // Slower feel: darker, low-passed, more reverb, slight delay
+      audio.playbackRate = 0.92; // Slightly slower
+      audioBPM = 140 * 0.92; // Adjust visual sync
+      
+      // Dark lowpass - cut highs
+      lowpassFilter.frequency.cancelScheduledValues(now);
+      lowpassFilter.frequency.setValueAtTime(lowpassFilter.frequency.value, now);
+      lowpassFilter.frequency.linearRampToValueAtTime(800, now + rampTime);
+      lowpassFilter.Q.setValueAtTime(2, now);
+      
+      // Open highpass
+      highpassFilter.frequency.cancelScheduledValues(now);
+      highpassFilter.frequency.setValueAtTime(highpassFilter.frequency.value, now);
+      highpassFilter.frequency.linearRampToValueAtTime(20, now + rampTime);
+      
+      // Heavy reverb
+      window.reverbGain.gain.cancelScheduledValues(now);
+      window.reverbGain.gain.setValueAtTime(window.reverbGain.gain.value, now);
+      window.reverbGain.gain.linearRampToValueAtTime(0.6, now + rampTime);
+      
+      // Subtle delay
+      delayNode.delayTime.setValueAtTime(0.3, now);
+      delayGain.gain.cancelScheduledValues(now);
+      delayGain.gain.setValueAtTime(delayGain.gain.value, now);
+      delayGain.gain.linearRampToValueAtTime(0.3, now + rampTime);
+      
+      // No distortion
+      distortionNode.curve = makeDistortionCurve(0);
+      
+      console.log('Mood: MOODY - dark, slow, reverby');
+      break;
+      
+    case 'playful':
+      // Lighter, bouncier, brighter, slightly faster
+      audio.playbackRate = 1.08; // Slightly faster
+      audioBPM = 140 * 1.08;
+      
+      // Open lowpass for brightness
+      lowpassFilter.frequency.cancelScheduledValues(now);
+      lowpassFilter.frequency.setValueAtTime(lowpassFilter.frequency.value, now);
+      lowpassFilter.frequency.linearRampToValueAtTime(18000, now + rampTime);
+      lowpassFilter.Q.setValueAtTime(0.5, now);
+      
+      // Slight highpass to remove mud, add bounce
+      highpassFilter.frequency.cancelScheduledValues(now);
+      highpassFilter.frequency.setValueAtTime(highpassFilter.frequency.value, now);
+      highpassFilter.frequency.linearRampToValueAtTime(150, now + rampTime);
+      highpassFilter.Q.setValueAtTime(1.5, now);
+      
+      // Light reverb
+      window.reverbGain.gain.cancelScheduledValues(now);
+      window.reverbGain.gain.setValueAtTime(window.reverbGain.gain.value, now);
+      window.reverbGain.gain.linearRampToValueAtTime(0.15, now + rampTime);
+      
+      // Short delay for bounce
+      delayNode.delayTime.setValueAtTime(0.1, now);
+      delayGain.gain.cancelScheduledValues(now);
+      delayGain.gain.setValueAtTime(delayGain.gain.value, now);
+      delayGain.gain.linearRampToValueAtTime(0.15, now + rampTime);
+      
+      // No distortion
+      distortionNode.curve = makeDistortionCurve(0);
+      
+      console.log('Mood: PLAYFUL - bright, bouncy, fast');
+      break;
+      
+    case 'tipper':
+      // Glitchy, chopped, experimental
+      audio.playbackRate = 1.0;
+      audioBPM = 140;
+      
+      // Mid-range filter for that processed sound
+      lowpassFilter.frequency.cancelScheduledValues(now);
+      lowpassFilter.frequency.setValueAtTime(lowpassFilter.frequency.value, now);
+      lowpassFilter.frequency.linearRampToValueAtTime(6000, now + rampTime);
+      lowpassFilter.Q.setValueAtTime(3, now);
+      
+      highpassFilter.frequency.cancelScheduledValues(now);
+      highpassFilter.frequency.setValueAtTime(highpassFilter.frequency.value, now);
+      highpassFilter.frequency.linearRampToValueAtTime(80, now + rampTime);
+      
+      // Moderate reverb
+      window.reverbGain.gain.cancelScheduledValues(now);
+      window.reverbGain.gain.setValueAtTime(window.reverbGain.gain.value, now);
+      window.reverbGain.gain.linearRampToValueAtTime(0.25, now + rampTime);
+      
+      // Glitchy delay
+      delayNode.delayTime.setValueAtTime(0.05, now);
+      delayGain.gain.cancelScheduledValues(now);
+      delayGain.gain.setValueAtTime(delayGain.gain.value, now);
+      delayGain.gain.linearRampToValueAtTime(0.4, now + rampTime);
+      
+      // Subtle distortion for grit
+      distortionNode.curve = makeDistortionCurve(50);
+      
+      // Rhythmic chopping - 16th notes at 140 BPM
+      var chopRate = (60 / 140) / 4 * 1000; // ms per 16th note
+      var chopCounter = 0;
+      chopperInterval = setInterval(function() {
+        var t = audioContext.currentTime;
+        chopCounter++;
+        // Random gate pattern: some hits silent, some normal, some quiet
+        var pattern = [1, 0.3, 1, 0, 1, 0.5, 0.8, 0, 1, 0, 0.6, 1, 0, 1, 0.4, 0.8];
+        var vol = pattern[chopCounter % pattern.length];
+        // Add some randomness
+        if (Math.random() < 0.2) vol = Math.random();
+        chopperGain.gain.setValueAtTime(vol, t);
+      }, chopRate);
+      
+      console.log('Mood: TIPPER - glitchy, chopped, experimental');
+      break;
+      
+    default:
+      // Neutral - reset everything
+      audio.playbackRate = 1.0;
+      audioBPM = 140;
+      
+      lowpassFilter.frequency.cancelScheduledValues(now);
+      lowpassFilter.frequency.linearRampToValueAtTime(20000, now + rampTime);
+      lowpassFilter.Q.setValueAtTime(1, now);
+      
+      highpassFilter.frequency.cancelScheduledValues(now);
+      highpassFilter.frequency.linearRampToValueAtTime(20, now + rampTime);
+      
+      window.reverbGain.gain.cancelScheduledValues(now);
+      window.reverbGain.gain.linearRampToValueAtTime(0, now + rampTime);
+      
+      delayGain.gain.cancelScheduledValues(now);
+      delayGain.gain.linearRampToValueAtTime(0, now + rampTime);
+      
+      distortionNode.curve = makeDistortionCurve(0);
+      
+      console.log('Mood: NEUTRAL');
+  }
+}
+
+// ============================================
+// START AUDIO FUNCTION
+// ============================================
+
 function startAudio() {
   if (running) return;
+  
+  // Initialize Web Audio graph on first play
+  if (!audioContext) {
+    initAudioGraph();
+  }
+  
+  // Resume audio context (required by browsers)
+  if (audioContext.state === 'suspended') {
+    audioContext.resume();
+  }
+  
   audio.play();
   running = true;
   mainLoop();
   setInterval(animateBarPunchcard, 100);
 }
 
-// Listen for message from parent page to start
+// ============================================
+// MESSAGE LISTENER
+// ============================================
+
 window.addEventListener('message', function(event) {
   if (event.data === 'startStrudel') {
     startAudio();
+  }
+  
+  // Handle mood changes
+  if (event.data && event.data.type === 'setMood') {
+    // Start audio if not already running
+    if (!running) {
+      startAudio();
+    }
+    applyMood(event.data.mood);
   }
 });
 
